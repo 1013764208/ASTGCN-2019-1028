@@ -1,0 +1,32 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "debug_train_astgcn",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train_ASTGCN_r.py",  // 确保路径正确
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--config",
+                "configurations/PEMS04_astgcn.conf"
+            ]
+        },
+        {
+            "name": "debug_prepare_datesets",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/prepareData.py",  // 确保路径正确
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--config",
+                "configurations/PEMS04_astgcn.conf"
+            ]
+        }
+    ]
+}
