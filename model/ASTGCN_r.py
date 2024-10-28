@@ -68,7 +68,7 @@ class cheb_conv_withSAt(nn.Module):
         input:
             K: int                          # 切比雪夫多项式的阶数
             in_channles                     # 输入通道数              
-            out_channels                    # 输出通道数
+            out_channels                    # 输出通道数，将其带到其他维度数中，捕获特征维度的信息
         """
         super(cheb_conv_withSAt, self).__init__()
         self.K = K
@@ -87,11 +87,10 @@ class cheb_conv_withSAt(nn.Module):
 
     def forward(self, x, spatial_attention):
         """
-        实现带有注意力机制的图卷积
-        使用切比雪夫多项式执行图卷积操作，捕获图中的空间依赖关系
+        模型能够利用图的结构信息（通过切比雪夫多项式）和注意力机制（通过注意力矩阵）来更新每个节点的特征表示，从而捕获复杂的空间依赖关系
 
         input:
-             x: (batch_size, N, F_in, T)
+             x: (batch_size, N, F_in, T)       # 图信号（原始矩阵）
              spatial_attention                 # 空间注意力矩阵，用于调整节点间的关系（这就是为什么 V 在函数外，因为这里要用注意力相关性矩阵）    
         
         return: 
@@ -103,33 +102,44 @@ class cheb_conv_withSAt(nn.Module):
 
         outputs = []
 
+        # 时间步循环
         for time_step in range(num_of_timesteps):
+            # 提取当前时间步的图信号（input x  节点的矩阵）
             graph_signal = x[:, :, :, time_step]  # (b, N, F_in)
 
-            # 初始化输出
+            # 初始化输出张量
             output = torch.zeros(batch_size, num_of_vertices, self.out_channels).to(
                 self.DEVICE
             )  # (b, N, F_out)
 
+            # 对于每个阶数 K
             for k in range(self.K):
+                # 获取第 K 阶切比雪夫多项式（公式 3）
                 T_k = self.cheb_polynomials[k]  # (N,N)
-
+                
+                # 计算与空间注意力矩阵的乘积，通过使用空间注意力矩阵，可以动态调解节点间的关系，从而增强卷积操作的表达能力
                 T_k_with_at = T_k.mul(
                     spatial_attention
                 )  # (N,N)*(N,N) = (N,N) 多行和为1, 按着列进行归一化
 
-                theta_k = self.Theta[k]  # (in_channel, out_channel)
-
+                # 目的：通过矩阵乘法，将调整后的邻接关系应用于输入信号（就是原始矩阵）
+                # T_k_with_at 表示节点之间经过注意力调整后的关系
                 rhs = T_k_with_at.permute(
                     0, 2, 1
                 ).matmul(
                     graph_signal
                 )  # (N, N)(b, N, F_in) = (b, N, F_in) 因为是左乘，所以多行和为1变为多列和为1，即一行之和为1，进行左乘
 
+                # 可学习参数
+                theta_k = self.Theta[k]  # (in_channel, out_channel)
+
+                # 将结果累加在 output 中（第 K 阶值）
+                # 将结果与对应的可学习参数 theta_k 相乘
                 output = output + rhs.matmul(
                     theta_k
                 )  # (b, N, F_in)(F_in, F_out) = (b, N, F_out)
 
+            # 将每个时间步的输出添加到 outputs 列表中，扩展维度以适应时间维度
             outputs.append(output.unsqueeze(-1))  # (b, N, F_out, 1)
 
         return F.relu(torch.cat(outputs, dim=-1))  # (b, N, F_out, T)
@@ -255,8 +265,8 @@ class ASTGCN_block(nn.Module):
         DEVICE,
         in_channels,
         K,
-        nb_chev_filter,
-        nb_time_filter,
+        nb_chev_filter,                         # 代表切比雪夫图卷积的输出通道数，通过不同的通道数来增强模型的表达能力
+        nb_time_filter,                         # 代表时间卷积的输出通道数，用于提取时间维度上的特征，帮助模型捕获时序信息；不同的时间通道数允许模型处理复杂的时间依赖关系
         time_strides,
         cheb_polynomials,
         num_of_vertices,
@@ -315,20 +325,39 @@ class ASTGCN_block(nn.Module):
         spatial_At = self.SAt(x_TAt)
 
         # 使用空间注意力矩阵进行图卷积，捕捉图结构中空间依赖关系
-        # todo： 看下 输入和输出的维度
+        # spatial_At.shape: [64, 307, 307], x.shape:[64, 307, 1, 72]
+        # spatial_gcn.shape: [64, 307, 64, 72]
         spatial_gcn = self.cheb_conv_SAt(x, spatial_At)  # (b,N,F,T)
 
 
         # 时间卷积
         """
+        目的：在提取空间特征基础上，进一步捕获时间维度上的依赖关系
         这里使用时间卷积的作用：
             提取局部时间特征：时间注意力机制获取全局的时间依赖关系，而时间卷积获取部分时间特征
             降维和特征变换
+
+        self.time_conv = nn.Conv2d(             # 卷积操作（二维卷积）
+            nb_chev_filter,                     # 输入通道                    
+            nb_time_filter,                     # 输出通道
+            kernel_size=(1, 3),                 # 表示在时间维度上应用 1D 卷积（跨越 3 个时间步），而在节点维度上不进行卷积
+            stride=(1, time_strides),           # 控制时间步的跳跃，允许提取不同的时间特征
+            padding=(0, 1),                     # 确保卷积操作后的时间维度大小不变
+        )
+
+        kernel_size=(1, 3)
+            1：表示在第三个维度（通常是节点维度）上，卷积核的大小为1。这意味着卷积核在这个维度上不进行跨越，只对单个特征或节点进行操作
+            3：表示在第四个维度（通常是时间维度）上，卷积核的大小为3。这意味着卷积核会跨越连续的3个时间步来进行卷积操作
+        
+        stride=(1, time_strides)
+            1：在节点维度上，步幅为 1，意味着卷积核在节点维度上逐个移动，不跳过任何节点
+            time_strides：在时间维度上，步幅为 time_strides，意味着卷积核在时间维度上每次移动 time_strides 个时间步
         """
         # 沿着时间轴应用 2D 卷积以提取时间特征
+        # 
         time_conv_output = self.time_conv(
             spatial_gcn.permute(0, 2, 1, 3)
-        )  # (b,N,F,T)->(b,F,N,T) 用(1,3)的卷积核去做->(b,F,N,T)
+        )  # (B, N, F, T)->(B, F, N, T) 用(1,3)的卷积核去做->(B, F, N, T)
 
         # 残差连接
         x_residual = self.residual_conv(
@@ -469,7 +498,7 @@ def make_model(
     # 计算缩放拉普拉斯矩阵
     L_tilde = scaled_Laplacian(adj_mx)
 
-    # 计算切比雪夫多项式
+    # 计算切比雪夫多项式（就是公式 3）
     cheb_polynomials = [
         torch.from_numpy(i).type(torch.FloatTensor).to(DEVICE)
         for i in cheb_polynomial(L_tilde, K)
